@@ -1,11 +1,11 @@
 package client.gui;
 
-import javax.swing.*;
-import javax.swing.table.DefaultTableModel;
 import java.awt.*;
 import java.awt.event.*;
 import java.io.*;
 import java.net.Socket;
+import javax.swing.*;
+import javax.swing.table.DefaultTableModel;
 
 public class MainWindow extends JFrame {
     private Socket socket;
@@ -100,37 +100,159 @@ public class MainWindow extends JFrame {
 
         new Thread(() -> {
             try {
+                // 1. Отправляем команду скачивания
                 out.println("DOWNLOAD " + filename);
+                out.flush();
 
-                // Автоматически сохраняем в текущую папку
-                File file = new File(filename);
+                // 2. Читаем ответ от сервера
+                String response = in.readLine();
 
-                try (FileOutputStream fos = new FileOutputStream(file);
-                     InputStream socketIn = socket.getInputStream()) {
+                if (response == null) {
+                    throw new IOException("Сервер не ответил");
+                }
 
-                    byte[] buffer = new byte[8192];
-                    int bytesRead;
+                // 3. Анализируем ответ
+                if (response.startsWith("DOWNLOAD_START:")) {
+                    // Новый формат: DOWNLOAD_START:filename:filesize
+                    String[] parts = response.split(":");
+                    String serverFilename = parts[1];
+                    long fileSize = Long.parseLong(parts[2]);
 
-                    while ((bytesRead = socketIn.read(buffer)) != -1) {
-                        fos.write(buffer, 0, bytesRead);
+                    System.out.println("Начинаю скачивание: " + serverFilename + " (" + fileSize + " байт)");
+
+                    // 4. Создаем файл для сохранения
+                    File file = new File(serverFilename);
+
+                    // 5. Получаем InputStream для чтения БИНАРНЫХ данных
+                    InputStream socketIn = socket.getInputStream();
+
+                    // 6. Читаем файл
+                    try (FileOutputStream fos = new FileOutputStream(file)) {
+
+                        byte[] buffer = new byte[8192];
+                        long totalRead = 0;
+                        int bytesRead;
+
+                        while (totalRead < fileSize) {
+                            long remaining = fileSize - totalRead;
+                            int toRead = (int) Math.min(buffer.length, remaining);
+
+                            bytesRead = socketIn.read(buffer, 0, toRead);
+
+                            if (bytesRead == -1) {
+                                throw new IOException("Соединение прервано. Получено " + totalRead + " из " + fileSize + " байт");
+                            }
+
+                            fos.write(buffer, 0, bytesRead);
+                            totalRead += bytesRead;
+
+                            // Обновляем прогресс
+                            final int progress = (int) ((totalRead * 100) / fileSize);
+                            SwingUtilities.invokeLater(() -> {
+                                statusLabel.setText("Скачивание: " + progress + "%");
+                            });
+
+                            // Небольшая пауза для UI
+                            try {
+                                Thread.sleep(1);
+                            } catch (InterruptedException e) {
+                                Thread.currentThread().interrupt();
+                            }
+                        }
+
+                        fos.flush();
+                        System.out.println("Файл скачан успешно: " + totalRead + " байт");
+
+                        // 7. УСПЕШНОЕ ЗАВЕРШЕНИЕ
+                        SwingUtilities.invokeLater(() -> {
+                            statusLabel.setText("Файл скачан: " + serverFilename);
+                            JOptionPane.showMessageDialog(MainWindow.this,
+                                    "✅ Файл успешно скачан!\n" +
+                                            "Имя: " + serverFilename + "\n" +
+                                            "Размер: " + (fileSize / 1024) + " KB\n" +
+                                            "Сохранен в: " + file.getAbsolutePath(),
+                                    "Успех", JOptionPane.INFORMATION_MESSAGE);
+                        });
+
                     }
 
+                } else if ("FILE_NOT_FOUND".equals(response)) {
                     SwingUtilities.invokeLater(() -> {
-                        statusLabel.setText("Файл скачан: " + filename);
+                        statusLabel.setText("Файл не найден");
                         JOptionPane.showMessageDialog(MainWindow.this,
-                                "Файл сохранен как: " + file.getAbsolutePath(),
-                                "Успех", JOptionPane.INFORMATION_MESSAGE);
+                                "❌ Файл не найден на сервере",
+                                "Ошибка", JOptionPane.ERROR_MESSAGE);
                     });
+                } else if (response.startsWith("SIZE:")) {
+                    // Старый формат для обратной совместимости
+                    long fileSize = Long.parseLong(response.substring(5));
+                    downloadFileOldFormat(filename, fileSize);
+                } else {
+                    throw new IOException("Неожиданный ответ сервера: " + response);
                 }
 
             } catch (Exception e) {
                 SwingUtilities.invokeLater(() -> {
                     statusLabel.setText("Ошибка скачивания");
+
+                    String errorMsg = e.getMessage();
+                    // Убираем технические детали для пользователя
+                    if (errorMsg != null && errorMsg.contains("яШяЫC")) {
+                        errorMsg = "Ошибка протокола: сервер отправил бинарные данные вместо текстовой команды";
+                    }
+
                     JOptionPane.showMessageDialog(MainWindow.this,
-                            "Ошибка: " + e.getMessage(),
+                            "❌ Ошибка при скачивании:\n" + errorMsg,
                             "Ошибка", JOptionPane.ERROR_MESSAGE);
                 });
+
+                System.err.println("Ошибка при скачивании:");
+                e.printStackTrace();
             }
         }).start();
     }
+
+    // Метод для старого формата (если сервер все еще использует SIZE:)
+    private void downloadFileOldFormat(String filename, long fileSize) {
+        try {
+            System.out.println("Использую старый формат для файла: " + filename);
+
+            File file = new File(filename);
+            InputStream socketIn = socket.getInputStream();
+
+            try (FileOutputStream fos = new FileOutputStream(file)) {
+
+                byte[] buffer = new byte[8192];
+                long totalRead = 0;
+                int bytesRead;
+
+                while (totalRead < fileSize) {
+                    long remaining = fileSize - totalRead;
+                    int toRead = (int) Math.min(buffer.length, remaining);
+
+                    bytesRead = socketIn.read(buffer, 0, toRead);
+
+                    if (bytesRead == -1) {
+                        throw new IOException("Соединение прервано");
+                    }
+
+                    fos.write(buffer, 0, bytesRead);
+                    totalRead += bytesRead;
+                }
+
+                System.out.println("Файл скачан (старый формат): " + totalRead + " байт");
+
+                SwingUtilities.invokeLater(() -> {
+                    statusLabel.setText("Файл скачан: " + filename);
+                    JOptionPane.showMessageDialog(MainWindow.this,
+                            "Файл скачан (старый формат)",
+                            "Успех", JOptionPane.INFORMATION_MESSAGE);
+                });
+            }
+
+        } catch (Exception e) {
+            e.printStackTrace();
+        }
+    }
 }
+
